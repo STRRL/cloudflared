@@ -45,6 +45,24 @@ func (n *nopCloseWriterAdapter) CloseWrite() error {
 	return nil
 }
 
+func (n *nopCloseWriterAdapter) OnStreamError(err error) {
+	if observer, ok := n.ReadWriter.(interface{ OnStreamError(error) }); ok {
+		observer.OnStreamError(err)
+	}
+}
+
+func (n *nopCloseWriterAdapter) OnStreamStart() {
+	if observer, ok := n.ReadWriter.(interface{ OnStreamStart() }); ok {
+		observer.OnStreamStart()
+	}
+}
+
+func (n *nopCloseWriterAdapter) OnStreamDone() {
+	if observer, ok := n.ReadWriter.(interface{ OnStreamDone() }); ok {
+		observer.OnStreamDone()
+	}
+}
+
 type bidirectionalStreamStatus struct {
 	doneChan chan struct{}
 	anyDone  uint32
@@ -97,6 +115,8 @@ func Pipe(tunnelConn, originConn io.ReadWriter, log *zerolog.Logger) {
 func PipeBidirectional(downstream, upstream Stream, maxWaitForSecondStream time.Duration, log *zerolog.Logger) error {
 	status := newBiStreamStatus()
 
+	reportStreamStart(downstream)
+	reportStreamStart(upstream)
 	go unidirectionalStream(downstream, upstream, "upstream->downstream", status, log)
 	go unidirectionalStream(upstream, downstream, "downstream->upstream", status, log)
 
@@ -127,14 +147,38 @@ func unidirectionalStream(dst WriterCloser, src Reader, dir string, status *bidi
 			}
 		}
 	}()
+	defer func() {
+		reportStreamDone(dst)
+		reportStreamDone(src)
+		status.markUniStreamDone()
+	}()
 
 	defer func() { _ = dst.CloseWrite() }()
 
 	_, err := copyData(dst, src, dir)
 	if err != nil {
+		reportStreamError(dst, err)
+		reportStreamError(src, err)
 		log.Debug().Msgf("%s copy: %v", dir, err)
 	}
-	status.markUniStreamDone()
+}
+
+func reportStreamError(stream any, err error) {
+	if observer, ok := stream.(interface{ OnStreamError(error) }); ok {
+		observer.OnStreamError(err)
+	}
+}
+
+func reportStreamStart(stream any) {
+	if observer, ok := stream.(interface{ OnStreamStart() }); ok {
+		observer.OnStreamStart()
+	}
+}
+
+func reportStreamDone(stream any) {
+	if observer, ok := stream.(interface{ OnStreamDone() }); ok {
+		observer.OnStreamDone()
+	}
 }
 
 // when set to true, enables logging of content copied to/from origin and tunnel

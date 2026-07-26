@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"strconv"
 	"time"
@@ -60,19 +61,21 @@ func NewOriginProxy(
 	return proxy
 }
 
-func (p *Proxy) applyIngressMiddleware(rule *ingress.Rule, r *http.Request, w connection.ResponseWriter) (error, bool) {
+func (p *Proxy) applyIngressMiddleware(rule *ingress.Rule, r *http.Request, w connection.ResponseWriter) (error, bool, bool) {
 	for _, handler := range rule.Handlers {
 		result, err := handler.Handle(r.Context(), r)
 		if err != nil {
-			return errors.Wrap(err, fmt.Sprintf("error while processing middleware handler %s", handler.Name())), false
+			return errors.Wrap(err, fmt.Sprintf("error while processing middleware handler %s", handler.Name())), false, false
 		}
 
 		if result.ShouldFilterRequest {
-			_ = w.WriteRespHeaders(result.StatusCode, nil)
-			return fmt.Errorf("request filtered by middleware handler (%s) due to: %s", handler.Name(), result.Reason), true
+			if err := w.WriteRespHeaders(result.StatusCode, nil); err != nil {
+				return errors.Wrap(err, "error writing middleware response headers"), false, true
+			}
+			return fmt.Errorf("request filtered by middleware handler (%s) due to: %s", handler.Name(), result.Reason), true, false
 		}
 	}
-	return nil, true
+	return nil, false, false
 }
 
 // ProxyHTTP further depends on ingress rules to establish a connection with the origin service. This may be
@@ -82,6 +85,7 @@ func (p *Proxy) ProxyHTTP(
 	tr *tracing.TracedHTTPRequest,
 	isWebsocket bool,
 ) error {
+	requestStart := time.Now()
 	incrementRequests()
 	defer decrementConcurrentRequests()
 
@@ -93,10 +97,25 @@ func (p *Proxy) ProxyHTTP(
 	rule, ruleNum := p.ingressRules.FindMatchingRule(req.Host, req.URL.Path)
 	ruleSpan.SetAttributes(attribute.Int("rule-num", ruleNum))
 	ruleSpan.End()
+	requestMetrics := newHostRequestMetrics(rule, req.Method, requestStart)
+	if req.Body != nil {
+		req.Body = &hostRequestBody{
+			ReadCloser: req.Body,
+			bytes:      &requestMetrics.requestBytes,
+		}
+	}
+	w = newHostResponseWriter(w, requestMetrics)
+	defer func() {
+		requestMetrics.finish()
+	}()
+
 	logger := newHTTPLogger(p.log, tr.ConnIndex, req, ruleNum, rule.Service.String())
 	logHTTPRequest(&logger, req)
-	if err, applied := p.applyIngressMiddleware(rule, req, w); err != nil {
-		if applied {
+	if err, filtered, proxyFailure := p.applyIngressMiddleware(rule, req, w); err != nil {
+		if proxyFailure {
+			requestMetrics.markProxyError()
+		}
+		if filtered {
 			logRequestError(&logger, err)
 			return nil
 		}
@@ -112,7 +131,9 @@ func (p *Proxy) ProxyHTTP(
 			isWebsocket,
 			rule.Config.DisableChunkedEncoding,
 			&logger,
+			requestMetrics,
 		); err != nil {
+			requestMetrics.markProxyError()
 			logRequestError(&logger, err)
 			return err
 		}
@@ -120,15 +141,22 @@ func (p *Proxy) ProxyHTTP(
 	case ingress.StreamBasedOriginProxy:
 		dest, err := getDestFromRule(rule, req)
 		if err != nil {
+			requestMetrics.markProxyError()
 			return err
 		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
+			requestMetrics.markProxyError()
 			return fmt.Errorf("response writer is not a flusher")
 		}
 		rws := connection.NewHTTPResponseReadWriterAcker(w, flusher, req)
 		logger := logger.With().Str(logFieldDestAddr, dest).Logger()
-		if err := p.proxyStream(tr.ToTracedContext(), rws, dest, originProxy, &logger); err != nil {
+		err = p.proxyStream(tr.ToTracedContext(), rws, dest, originProxy, &logger, requestMetrics)
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		if err != nil {
+			requestMetrics.markProxyError()
 			logRequestError(&logger, err)
 			return err
 		}
@@ -137,6 +165,7 @@ func (p *Proxy) ProxyHTTP(
 		p.proxyLocalRequest(originProxy, w, req, isWebsocket)
 		return nil
 	default:
+		requestMetrics.markProxyError()
 		return fmt.Errorf("unrecognized service: %s, %t", rule.Service, originProxy)
 	}
 }
@@ -190,6 +219,7 @@ func (p *Proxy) proxyHTTPRequest(
 	isWebsocket bool,
 	disableChunkedEncoding bool,
 	logger *zerolog.Logger,
+	requestMetrics *hostRequestMetrics,
 ) error {
 	roundTripReq := tr.Request
 	if isWebsocket {
@@ -218,6 +248,8 @@ func (p *Proxy) proxyHTTPRequest(
 	}
 
 	_, ttfbSpan := tr.Tracer().Start(tr.Context(), "ttfb_origin")
+	requestMetrics.startOrigin()
+	roundTripReq = roundTripReq.WithContext(httptrace.WithClientTrace(roundTripReq.Context(), requestMetrics.originTrace()))
 	resp, err := httpService.RoundTrip(roundTripReq)
 	if err != nil {
 		tracing.EndWithErrorStatus(ttfbSpan, err)
@@ -226,6 +258,7 @@ func (p *Proxy) proxyHTTPRequest(
 		}
 		return errors.Wrap(err, "Unable to reach the origin service. The service may be down or it may not be responding to traffic from cloudflared")
 	}
+	requestMetrics.receiveOriginHeaders()
 
 	tracing.EndWithStatusCode(ttfbSpan, resp.StatusCode)
 	defer func() { _ = resp.Body.Close() }()
@@ -239,6 +272,7 @@ func (p *Proxy) proxyHTTPRequest(
 	// Add spans to response header (if available)
 	tr.AddSpans(headers)
 
+	requestMetrics.setStatus(resp.StatusCode)
 	err = w.WriteRespHeaders(resp.StatusCode, headers)
 	if err != nil {
 		return errors.Wrap(err, "Error writing response header")
@@ -252,11 +286,16 @@ func (p *Proxy) proxyHTTPRequest(
 		defer func() { _ = rwc.Close() }()
 
 		eyeballStream := &bidirectionalStream{
-			writer: w,
-			reader: tr.Body,
+			writer:  w,
+			reader:  tr.Body,
+			metrics: requestMetrics,
 		}
 
 		stream.Pipe(eyeballStream, rwc, logger)
+		_ = rwc.Close()
+		if tr.Body != nil {
+			_ = tr.Body.Close()
+		}
 		return nil
 	}
 
@@ -280,12 +319,16 @@ func (p *Proxy) proxyStream(
 	dest string,
 	originDialer ingress.StreamBasedOriginProxy,
 	logger *zerolog.Logger,
+	requestMetrics *hostRequestMetrics,
 ) error {
 	ctx := tr.Context
 	_, connectSpan := tr.Tracer().Start(ctx, "stream-connect")
 
 	start := time.Now()
+	requestMetrics.startOrigin()
+	requestMetrics.startConnect()
 	originConn, err := originDialer.EstablishConnection(ctx, dest, logger)
+	requestMetrics.finishConnect(false, true)
 	if err != nil {
 		connectStreamErrors.Inc()
 		tracing.EndWithErrorStatus(connectSpan, err)
@@ -301,11 +344,15 @@ func (p *Proxy) proxyStream(
 		connectStreamErrors.Inc()
 		return err
 	}
+	requestMetrics.startOriginStream()
 
 	connectLatency.Observe(float64(time.Since(start).Milliseconds()))
 	logger.Debug().Msg("proxy stream acknowledged")
 
-	originConn.Stream(ctx, rwa, logger)
+	originConn.Stream(ctx, &hostReadWriteAcker{
+		ReadWriteAcker: rwa,
+		metrics:        requestMetrics,
+	}, logger)
 	return nil
 }
 
@@ -360,8 +407,9 @@ func (p *Proxy) proxyLocalRequest(proxy ingress.HTTPLocalProxy, w connection.Res
 }
 
 type bidirectionalStream struct {
-	reader io.Reader
-	writer io.Writer
+	reader  io.Reader
+	writer  io.Writer
+	metrics *hostRequestMetrics
 }
 
 func (wr *bidirectionalStream) Read(p []byte) (n int, err error) {
@@ -370,6 +418,18 @@ func (wr *bidirectionalStream) Read(p []byte) (n int, err error) {
 
 func (wr *bidirectionalStream) Write(p []byte) (n int, err error) {
 	return wr.writer.Write(p)
+}
+
+func (wr *bidirectionalStream) OnStreamError(error) {
+	wr.metrics.markProxyError()
+}
+
+func (wr *bidirectionalStream) OnStreamStart() {
+	wr.metrics.startStream()
+}
+
+func (wr *bidirectionalStream) OnStreamDone() {
+	wr.metrics.finishStreamDirection()
 }
 
 func (p *Proxy) appendTagHeaders(r *http.Request) {

@@ -121,6 +121,24 @@ func (c *Conn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func (c *Conn) OnStreamError(err error) {
+	if observer, ok := c.rw.(interface{ OnStreamError(error) }); ok {
+		observer.OnStreamError(err)
+	}
+}
+
+func (c *Conn) OnStreamStart() {
+	if observer, ok := c.rw.(interface{ OnStreamStart() }); ok {
+		observer.OnStreamStart()
+	}
+}
+
+func (c *Conn) OnStreamDone() {
+	if observer, ok := c.rw.(interface{ OnStreamDone() }); ok {
+		observer.OnStreamDone()
+	}
+}
+
 func (c *Conn) pinger(ctx context.Context) {
 	pongMessge := wsutil.Message{
 		OpCode:  gobwas.OpPong,
