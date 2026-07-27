@@ -1,0 +1,138 @@
+name: Sync upstream release
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Sync the latest stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPOSITORY: cloudflare/cloudflared
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(gh api "repos/${UPSTREAM_REPOSITORY}/releases/latest" --jq ".tag_name")
+          if [[ ! "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected upstream release version: $version"
+            exit 1
+          fi
+
+          upstream_url="https://github.com/${UPSTREAM_REPOSITORY}.git"
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "$upstream_url"
+          else
+            git remote add upstream "$upstream_url"
+          fi
+
+          git fetch --force upstream "refs/tags/${version}:refs/tags/${version}"
+          release_commit=$(git rev-parse "${version}^{commit}")
+
+          if git merge-base --is-ancestor "$release_commit" origin/master; then
+            echo "Fork already contains upstream release $version"
+            exit 0
+          fi
+
+          branch="sync/upstream-${version}"
+          git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}" || true
+          git checkout -B "$branch" origin/master
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git merge --no-ff "$release_commit" -m "Merge upstream cloudflared ${version}"; then
+            conflict_files=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+
+            issue_title="Upstream sync conflict: ${version}"
+            issue_body=$(mktemp)
+            {
+              echo "The automatic merge of cloudflare/cloudflared ${version} has conflicts."
+              echo
+              echo "Conflicting files:"
+              echo
+              echo '```text'
+              echo "$conflict_files"
+              echo '```'
+              echo
+              echo "Upstream release: https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/${version}"
+            } > "$issue_body"
+
+            issue_number=$(
+              gh issue list \
+                --repo "$GITHUB_REPOSITORY" \
+                --state open \
+                --limit 100 \
+                --json number,title |
+                jq -r --arg title "$issue_title" \
+                  '.[] | select(.title == $title) | .number' |
+                head -n 1
+            )
+
+            if [[ -n "$issue_number" ]]; then
+              gh issue edit "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body-file "$issue_body"
+            else
+              gh issue create \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$issue_title" \
+                --body-file "$issue_body"
+            fi
+
+            exit 1
+          fi
+
+          git push --force-with-lease origin "HEAD:refs/heads/${branch}"
+
+          pr_title="Merge upstream cloudflared ${version}"
+          pr_body=$(mktemp)
+          {
+            echo "This Draft PR merges the upstream cloudflared ${version} release into the fork."
+            echo
+            echo "Merge this PR with Create a merge commit."
+            echo
+            echo "Do not use squash or rebase."
+            echo
+            echo "Upstream release: https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/${version}"
+          } > "$pr_body"
+
+          pr_number=$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --head "$branch" \
+              --state open \
+              --limit 1 \
+              --json number \
+              --jq '.[0].number // empty'
+          )
+
+          if [[ -n "$pr_number" ]]; then
+            echo "Updated existing PR #${pr_number}"
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base master \
+              --head "$branch" \
+              --draft \
+              --title "$pr_title" \
+              --body-file "$pr_body"
+          fi
