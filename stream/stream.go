@@ -1,7 +1,6 @@
 package stream
 
 import (
-	"encoding/hex"
 	"fmt"
 	"io"
 	"runtime/debug"
@@ -155,7 +154,7 @@ func unidirectionalStream(dst WriterCloser, src Reader, dir string, status *bidi
 
 	defer func() { _ = dst.CloseWrite() }()
 
-	_, err := copyData(dst, src, dir)
+	_, err := cfio.Copy(dst, src)
 	if err != nil {
 		reportStreamError(dst, err)
 		reportStreamError(src, err)
@@ -178,52 +177,5 @@ func reportStreamStart(stream any) {
 func reportStreamDone(stream any) {
 	if observer, ok := stream.(interface{ OnStreamDone() }); ok {
 		observer.OnStreamDone()
-	}
-}
-
-// when set to true, enables logging of content copied to/from origin and tunnel
-const debugCopy = false
-
-func copyData(dst io.Writer, src io.Reader, dir string) (written int64, err error) {
-	if debugCopy {
-		// copyBuffer is based on stdio Copy implementation but shows copied data
-		copyBuffer := func(dst io.Writer, src io.Reader, dir string) (written int64, err error) {
-			var buf []byte
-			size := 32 * 1024
-			buf = make([]byte, size)
-			for {
-				t := time.Now()
-				nr, er := src.Read(buf)
-				if nr > 0 {
-					fmt.Println(dir, t.UnixNano(), "\n"+hex.Dump(buf[0:nr]))
-					nw, ew := dst.Write(buf[0:nr])
-					if nw < 0 || nr < nw {
-						nw = 0
-						if ew == nil {
-							ew = errors.New("invalid write")
-						}
-					}
-					written += int64(nw)
-					if ew != nil {
-						err = ew
-						break
-					}
-					if nr != nw {
-						err = io.ErrShortWrite
-						break
-					}
-				}
-				if er != nil {
-					if er != io.EOF {
-						err = er
-					}
-					break
-				}
-			}
-			return written, err
-		}
-		return copyBuffer(dst, src, dir)
-	} else {
-		return cfio.Copy(dst, src)
 	}
 }

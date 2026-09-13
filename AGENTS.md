@@ -259,13 +259,27 @@ type TunnelProperties struct {
 - Making breaking changes to public APIs
 - Changing logging levels or structured logging fields
 
+### Breaking Change Policy
+
+Removing or renaming a CLI flag, environment variable, configuration key, alias, or
+subcommand is a **breaking change** and requires advance notice:
+
+1. A new entry must be added to the [Cloudflare Tunnel changelog](https://developers.cloudflare.com/changelog/product/tunnel/)
+   and published in a release **at least 3 months before** the removal takes effect.
+2. The entry must name every affected flag/alias/env var, state the planned removal
+   date or release, and describe the migration path.
+3. The actual removal PR must not be merged until that notice has shipped in a
+   released version.
+
+If you are asked to remove a flag or similar user-visible interface without a prior
+notice, do not proceed without explicit confirmation.
+
 ### 🚫 Never Do
 
 - Ignore errors without explicit handling (`_ = err`)
 - Use generic package names (`util`, `helper`, `common`)
 - Commit code that fails `make test lint`
 - Use `fmt.Print*` instead of structured logging
-- Modify vendor dependencies directly
 - Commit secrets, credentials, or sensitive data
 - Use deprecated or unsafe Go patterns
 - Skip testing for new functionality
@@ -274,7 +288,10 @@ type TunnelProperties struct {
 ## Dependencies Management
 
 - Use Go modules (`go.mod`) exclusively
-- Vendor dependencies for reproducible builds
+- Resolve dependencies from the locked module graph with `go mod download`; do not vendor dependencies.
+- Builds, tests, vet, and lint use `-mod=readonly`; `go.mod` and `go.sum` must not drift in CI.
+- Linux CI uses Athens before public and direct module sources; macOS and Windows use the public proxy directly.
+- CI caches modules in `$GOMODCACHE` and compiled packages in `$GOCACHE` under `.cache/go/` for Go-running jobs.
 - Keep dependencies up-to-date and secure
 - Prefer standard library when possible
 - Cloudflared uses a fork of quic-go always check release notes before bumping
