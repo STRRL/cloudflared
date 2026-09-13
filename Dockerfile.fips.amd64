@@ -1,22 +1,26 @@
 # use a builder image for building cloudflared
 ARG CLOUDFLARE_DOCKER_REGISTRY_HOST
-FROM ${CLOUDFLARE_DOCKER_REGISTRY_HOST:-registry.cfdata.org}/stash/plat/dockerfiles/debian-trixie-golang-boring/master:1.26.4-1@sha256:6306b83f8fcec303db94ebb69ad2f1f0aea5c09115f845839757afca4699925c AS builder
+FROM ${CLOUDFLARE_DOCKER_REGISTRY_HOST:-registry.cfdata.org}/stash/plat/dockerfiles/debian-trixie-golang-boring/master:1.26.8-1@sha256:2cff81b1547df7c6bfe0cdba17b76678054d5054bedd71809be0829e5f3fc652 AS builder
 ENV GO111MODULE=on \
   CGO_ENABLED=1 \
+  GOPROXY=https://athens.cfdata.org|https://proxy.golang.org|direct \
   # the CONTAINER_BUILD envvar is used set github.com/cloudflare/cloudflared/metrics.Runtime=virtual
   # which changes how cloudflared binds the metrics server
   CONTAINER_BUILD=1
 
 WORKDIR /go/src/github.com/cloudflare/cloudflared/
 
-# copy our sources into the builder image
+# Download dependencies in their own layer so source-only changes reuse it.
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY . .
 
 # compile cloudflared
 RUN FIPS=true GOOS=linux GOARCH=amd64 make cloudflared
 
 # use a distroless base image with glibc
-FROM gcr.io/distroless/base-debian13:nonroot-amd64@sha256:ce2a20e0e277b7d913aa8bcfa098fc2a543dc08028f7393434963fa24b39ea81
+FROM gcr.io/distroless/base-debian13:nonroot-amd64@sha256:1411d9ad56e6210f3e3f71bd73e73122f91c6bca9422dcbc59750e30a13c95c0
 
 LABEL org.opencontainers.image.source="https://github.com/cloudflare/cloudflared"
 
