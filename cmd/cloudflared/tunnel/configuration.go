@@ -22,7 +22,6 @@ import (
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/flags"
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
-	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
 	"github.com/cloudflare/cloudflared/features"
 	"github.com/cloudflare/cloudflared/ingress"
@@ -47,7 +46,6 @@ var (
 		flags.Retries,
 		flags.Protocol,
 		flags.LogLevel,
-		flags.TransportLogLevel,
 		flags.OriginCert,
 		flags.Metrics,
 		flags.MetricsUpdateFreq,
@@ -115,7 +113,7 @@ func prepareTunnelConfig(
 	ctx context.Context,
 	c *cli.Context,
 	info *cliutil.BuildInfo,
-	log, logTransport *zerolog.Logger,
+	log *zerolog.Logger,
 	observer *connection.Observer,
 	namedTunnel *connection.TunnelProperties,
 ) (*supervisor.TunnelConfig, *orchestration.Config, error) {
@@ -146,7 +144,7 @@ func prepareTunnelConfig(
 		return nil, nil, err
 	}
 
-	protocolSelector, err := connection.NewProtocolSelector(transportProtocol, namedTunnel.Credentials.AccountTag, c.IsSet(TunnelTokenFlag), edgediscovery.ProtocolPercentage, connection.ResolveTTL, log)
+	protocolSelector, err := connection.NewProtocolSelector(transportProtocol, log)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -236,7 +234,6 @@ func prepareTunnelConfig(
 		LBPool:          c.String(flags.LBPool),
 		Tags:            tags,
 		Log:             log,
-		LogTransport:    logTransport,
 		Observer:        observer,
 		ReportedVersion: info.Version(),
 		// Note TUN-3758 , we use Int because UInt is not supported with altsrc
