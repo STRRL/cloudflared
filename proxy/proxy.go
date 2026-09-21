@@ -98,7 +98,7 @@ func (p *Proxy) ProxyHTTP(
 	ruleSpan.SetAttributes(attribute.Int("rule-num", ruleNum))
 	ruleSpan.End()
 	requestMetrics := newHostRequestMetrics(rule, req.Method, requestStart)
-	if req.Body != nil {
+	if req.Body != nil && req.Body != http.NoBody {
 		req.Body = &hostRequestBody{
 			ReadCloser: req.Body,
 			bytes:      &requestMetrics.requestBytes,
