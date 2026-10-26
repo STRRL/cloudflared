@@ -493,6 +493,7 @@ func TestProxyHTTPRequestCancelsBeforeClosingHTTP2Response(t *testing.T) {
 			false,
 			false,
 			&log,
+			newHostRequestMetrics(&ingress.Rule{}, req.Method, time.Now()),
 		)
 	}()
 
