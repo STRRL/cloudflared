@@ -1,3 +1,13 @@
+// This module file is only used by builds with the duckmon tag, through
+// GOFLAGS="-mod=mod -modfile=go.duckmon.mod". It is go.mod plus the duckmon
+// dependency, and it can drift from go.mod when upstream changes go.mod.
+// After merging upstream changes, refresh this file with:
+//
+//	cp go.mod go.duckmon.mod
+//	GOFLAGS="-mod=mod -modfile=go.duckmon.mod" go get github.com/STRRL/duckmon/bindings/go@latest
+//	GOFLAGS="-mod=mod -modfile=go.duckmon.mod" go mod tidy
+//
+// Then rebuild with the duckmon tag to confirm it still compiles.
 module github.com/cloudflare/cloudflared
 
 go 1.26.0
