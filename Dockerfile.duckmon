@@ -19,8 +19,8 @@ COPY . .
 RUN go build -tags duckmon -ldflags='-s -w' -o cloudflared ./cmd/cloudflared
 
 # use a distroless base image with glibc and libstdc++, which the duckmon
-# static library needs
-FROM gcr.io/distroless/cc-debian12:nonroot
+# static library needs; debian13 matches the libstdc++ of the builder image
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 LABEL org.opencontainers.image.source="https://github.com/STRRL/cloudflared"
 
