@@ -1,0 +1,35 @@
+# Build cloudflared with the duckmon access log enabled.
+# The duckmon build uses its own module file, go.duckmon.mod, and ignores
+# the vendor directory, because the prebuilt duckmon static libraries are
+# not vendored.
+FROM golang:1.26.4 AS builder
+ENV GO111MODULE=on \
+  CGO_ENABLED=1 \
+  GOFLAGS="-mod=mod -modfile=go.duckmon.mod" \
+  # the CONTAINER_BUILD envvar is used set github.com/cloudflare/cloudflared/metrics.Runtime=virtual
+  # which changes how cloudflared binds the metrics server
+  CONTAINER_BUILD=1
+
+WORKDIR /go/src/github.com/cloudflare/cloudflared/
+
+# copy our sources into the builder image
+COPY . .
+
+# compile cloudflared with the duckmon tag
+RUN go build -tags duckmon -ldflags='-s -w' -o cloudflared ./cmd/cloudflared
+
+# use a distroless base image with glibc and libstdc++, which the duckmon
+# static library needs
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+LABEL org.opencontainers.image.source="https://github.com/STRRL/cloudflared"
+
+# copy our compiled binary
+COPY --from=builder --chown=nonroot /go/src/github.com/cloudflare/cloudflared/cloudflared /usr/local/bin/
+
+# run as nonroot user
+USER nonroot
+
+# command / entrypoint of container
+ENTRYPOINT ["cloudflared", "--no-autoupdate"]
+CMD ["version"]

@@ -394,6 +394,8 @@ func (m *hostRequestMetrics) finish() {
 	if m.responseObserved {
 		hostResponseDuration.WithLabelValues(labels...).Observe(now.Sub(m.originStart).Seconds())
 	}
+
+	recordRequestEvent(m, now)
 }
 
 type hostRequestBody struct {
